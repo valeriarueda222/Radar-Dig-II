@@ -1,0 +1,188 @@
+#include <Arduino.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// --- CONFIGURACIÓN PANTALLA OLED ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+Preferences preferences;
+
+// Pines Motor ULN2003
+const int IN1 = 27; const int IN2 = 26;
+const int IN3 = 25; const int IN4 = 33;
+
+// Pines Sensor HC-SR04
+const int trigPin = 32; 
+const int echoPin = 34;
+
+// Pines para sonido
+const int buzzerPin = 12;
+
+int seq[8][4] = {
+  {1, 0, 0, 0}, {1, 1, 0, 0}, {0, 1, 0, 0}, {0, 1, 1, 0},
+  {0, 0, 1, 0}, {0, 0, 1, 1}, {0, 0, 0, 1}, {1, 0, 0, 1}
+};
+
+const int STEPS_PER_REV = 4096;
+int currentPos = 0;
+
+// --- VARIABLES DEL RADAR ---
+const int MAX_DISTANCE_CM = 60; // Distancia máxima en pantalla
+const int ESTELA_VIDA = 12;     // <-- ¡NUEVO! Qué tan rápido desaparecen los puntos (menor = más rápido)
+
+uint8_t radarMap[360];          // Memoria de distancias
+uint8_t pointLife[360];         // <-- ¡NUEVO! Memoria de la "vida" de cada punto
+
+void setStep(int a, int b, int c, int d) {
+  digitalWrite(IN1, a); digitalWrite(IN2, b);
+  digitalWrite(IN3, c); digitalWrite(IN4, d);
+}
+
+long getDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  // Timeout de 6000us (aprox 1 metro máximo). ¡Hace que el motor no se quede esperando al vacío!
+  long duration = pulseIn(echoPin, HIGH, 6000); 
+  
+  if (duration == 0) return 999; // Si da 0 (timeout), mandamos un valor fuera del rango
+  return duration * 0.034 / 2;
+}
+
+// Función encargada exclusivamente de dibujar gráficos en la OLED
+void drawRadarScreen(int currentAngle) {
+  display.clearDisplay();
+
+  int cx = SCREEN_WIDTH / 2;  
+  int cy = SCREEN_HEIGHT / 2; 
+  int radius = 31;            
+
+  // 1. Dibujar la "cuadrícula" del radar
+  display.drawCircle(cx, cy, radius, SSD1306_WHITE);       
+  display.drawCircle(cx, cy, radius / 2, SSD1306_WHITE);   
+  display.drawLine(cx, 0, cx, SCREEN_HEIGHT, SSD1306_WHITE); 
+  display.drawLine(cx - radius, cy, cx + radius, cy, SSD1306_WHITE); 
+
+  // 2. Dibujar los puntos detectados y restarles "vida"
+  for (int i = 0; i < 360; i++) {
+    if (pointLife[i] > 0) { // Solo dibujamos si el punto sigue "vivo"
+      float rad = i * PI / 180.0;
+      float distance_px = ((float)radarMap[i] / MAX_DISTANCE_CM) * radius;
+      
+      int px = cx + distance_px * cos(rad);
+      int py = cy - distance_px * sin(rad); 
+      
+      display.fillRect(px, py, 2, 2, SSD1306_WHITE);
+      
+      // Envejecer el punto para que desaparezca pronto
+      pointLife[i]--; 
+    }
+  }
+
+  // 3. Dibujar la línea de barrido actual
+  float radLine = currentAngle * PI / 180.0;
+  int lx = cx + radius * cos(radLine);
+  int ly = cy - radius * sin(radLine);
+  display.drawLine(cx, cy, lx, ly, SSD1306_WHITE);
+
+  // Enviar a la pantalla
+  display.display();
+}
+
+unsigned long ultimoSonido = 0;
+
+void hablarComoWallE(long distancia) {
+  // Si ha pasado muy poco tiempo desde el último pitido, salimos para no trabar el motor
+  if (millis() - ultimoSonido < 150) return;
+
+  if (distancia > 2 && distancia <= 15) {
+    // Tono rápido de peligro, no frena el motor
+    tone(buzzerPin, 2500, 30); 
+    ultimoSonido = millis();
+  } 
+  else if (distancia > 15 && distancia <= 40) {
+    // Tono curioso, un poco más largo
+    tone(buzzerPin, 1000, 60); 
+    ultimoSonido = millis();
+  }
+}
+
+void moveAndScan(int targetPos) {
+  while (currentPos != targetPos) {
+    if (currentPos < targetPos) currentPos++;
+    else currentPos--;
+
+    int idx = abs(currentPos) % 8;
+    setStep(seq[idx][0], seq[idx][1], seq[idx][2], seq[idx][3]);
+    delay(4); 
+
+    // Cada 40 pasos tomamos lectura y dibujamos
+    if (currentPos % 40 == 0) {
+      int angle = map(currentPos, 0, STEPS_PER_REV, 0, 360);
+      long dist = getDistance();
+      
+      // Habla WALL-E
+      hablarComoWallE(dist); 
+
+      // Actualizar el mapa de memoria
+      if (dist > 2 && dist <= MAX_DISTANCE_CM) { // Filtramos la basura desde el inicio
+        radarMap[angle] = dist; 
+        pointLife[angle] = ESTELA_VIDA; // Le damos vida máxima al nuevo punto
+      } 
+      // Ya no forzamos radarMap[angle] = 0 aquí, dejamos que la "vida" lo mate suavemente
+      
+      drawRadarScreen(angle);
+      
+      if (currentPos % 200 == 0) preferences.putInt("pos", currentPos);
+    }
+  }
+  preferences.putInt("pos", currentPos);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  pinMode(trigPin, OUTPUT); pinMode(echoPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  preferences.begin("radar", false);
+  currentPos = preferences.getInt("pos", 0);
+
+  // Limpiar memoria del radar al encender
+  for(int i=0; i<360; i++) {
+    radarMap[i] = 0;
+    pointLife[i] = 0;
+  }
+
+  Wire.begin();
+  Wire.setClock(400000); 
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println(F("Fallo al iniciar la OLED"));
+    for(;;); 
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(20, 25);
+  display.println("INICIANDO RADAR");
+  display.display();
+  delay(2000);
+}
+
+void loop() {
+  moveAndScan(STEPS_PER_REV);
+  delay(500);
+  moveAndScan(0);             
+  delay(500);
+}
