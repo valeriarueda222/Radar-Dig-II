@@ -1,4 +1,4 @@
-# Radar de Proximidad con Efecto de Persistencia (ESP32)
+# Radar de Proximidad
 
 ## 1. Idea General del Proyecto
 Este proyecto consiste en el diseño y construcción de un radar de barrido sonar interactivo controlado por un microcontrolador ESP32. El sistema simula el comportamiento de un radar militar o marítimo real, donde un sensor ultrasónico gira constantemente de forma horizontal buscando obstáculos en el entorno. Cuando el sensor detecta un objeto, calcula su posición exacta mediante variables de ángulo y distancia para enviarla a una pantalla OLED, espacio en el cual se dibuja un mapa bidimensional en tiempo real. El sistema destaca por su fluidez visual y por su capacidad de mantener un registro gráfico dinámico de los objetos detectados mientras el sensor continúa su trayectoria de exploración.
